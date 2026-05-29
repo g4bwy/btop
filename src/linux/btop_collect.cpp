@@ -362,6 +362,7 @@ namespace Shared {
 		for (const auto& [sensor, ignored] : Cpu::found_sensors) {
 			Cpu::available_sensors.push_back(sensor);
 		}
+		Sensors::get_sensors();
 		Cpu::core_mapping = Cpu::get_core_mapping();
 
 		Cpu::container_engine = detect_container();
@@ -1210,6 +1211,9 @@ namespace Cpu {
 
 		if (Config::getB("check_temp") and got_sensors)
 			update_sensors();
+
+		if (Config::getB("show_sensors") and not Sensors::sensors.empty())
+			Sensors::update_sensors();
 
 		if (Config::getB("show_battery") and has_battery)
 			current_bat = get_battery();
@@ -3409,6 +3413,134 @@ namespace Proc {
 		numpids = (int)current_procs.size() - filter_found;
 
 		return current_procs;
+	}
+}
+
+namespace Sensors {
+	bool shown;
+	vector<sensor_info> sensors;
+
+	static bool matches_filter(const string& driver) {
+		const string& filter = Config::getS("sensors_filter");
+		if (filter.empty()) return true;
+		for (const auto& f : ssplit(filter, ',')) {
+			if (string{f} == driver) return true;
+		}
+		return false;
+	}
+
+	bool get_sensors() {
+		sensors.clear();
+		vector<fs::path> search_paths;
+		try {
+			if (fs::exists(fs::path("/sys/class/hwmon")) and access("/sys/class/hwmon", R_OK) != -1) {
+				for (const auto& dir : fs::directory_iterator(fs::path("/sys/class/hwmon"))) {
+					fs::path add_path = fs::canonical(dir.path());
+					if (v_contains(search_paths, add_path) or v_contains(search_paths, add_path / "device")) continue;
+
+					for (const auto & file : fs::directory_iterator(add_path)) {
+						if (file.path().filename() == "device") {
+							for (const auto & dev_file : fs::directory_iterator(file.path())) {
+								string dev_filename = dev_file.path().filename();
+								if (dev_filename.starts_with("temp") and dev_filename.ends_with("_input")) {
+									search_paths.push_back(file.path());
+									break;
+								}
+							}
+						}
+						string filename = file.path().filename();
+						if (filename.starts_with("temp") and filename.ends_with("_input")) {
+							search_paths.push_back(add_path);
+							break;
+						}
+					}
+				}
+			}
+
+			//? Scan hwmon directories for non-CPU sensors
+			for (const auto& path : search_paths) {
+				const string pname = readfile(path / "name", path.filename());
+
+				//? Skip known CPU-only drivers unless explicitly requested in filter
+				if (is_in(pname, "coretemp", "k10temp", "amdtis")) {
+					if (Config::getS("sensors_filter").empty()) continue;
+				}
+
+				if (not matches_filter(pname)) continue;
+
+				for (const auto & file : fs::directory_iterator(path)) {
+					string filename = file.path().filename();
+					if (not (filename.starts_with("temp") and filename.ends_with("_input"))) continue;
+
+					const int file_id = atoi(filename.c_str() + 4);
+					const string basepath = file.path().string().substr(0, file.path().string().find("_input")) + "_";
+					const string label = readfile(fs::path(basepath + "label"), "temp" + to_string(file_id));
+
+					//? Skip voltage and non-temperature labels
+					const string label_lower = str_to_lower(label);
+					if (label_lower.contains("vbat") or label_lower.contains("vcc") or label_lower.contains("vsb")
+						or label_lower.contains("vin") or label_lower.contains("+3.3") or label_lower.contains("vcc5")
+						or label_lower.contains("vbat") or label_lower.contains("12v") or label_lower.contains("5v")
+						or label_lower.starts_with("+") or label_lower.starts_with("v")) continue;
+
+					sensor_info si;
+					si.name = pname + "/" + label;
+					si.driver = pname;
+					si.temp_path = fs::path(basepath + "input");
+					si.temp_max = stol(readfile(fs::path(basepath + "max"), "0")) / 1000;
+					si.temp_high = stol(readfile(fs::path(basepath + "high"), "0")) / 1000;
+					if (si.temp_max < 1) si.temp_max = stol(readfile(fs::path(basepath + "crit"), "95000")) / 1000;
+					si.temp = { stol(readfile(fs::path(basepath + "input"), "0")) / 1000 };
+					sensors.push_back(si);
+				}
+			}
+
+			//? Scan thermal zones for non-CPU sensors
+			if (fs::exists(fs::path("/sys/class/thermal"))) {
+				const string rootpath = fs::path("/sys/class/thermal/thermal_zone");
+				for (int i = 0; fs::exists(fs::path(rootpath + to_string(i))); i++) {
+					const fs::path basepath = rootpath + to_string(i);
+					if (not fs::exists(basepath / "temp")) continue;
+					const string label = readfile(basepath / "type", "temp" + to_string(i));
+
+					//? Skip known CPU thermal zones
+					if (is_in(label, "x86_pkg_temp", "cpu_thermal", "ACPI")) continue;
+
+					if (not matches_filter("thermal")) continue;
+
+					sensor_info si;
+					si.name = "thermal" + to_string(i) + "/" + label;
+					si.driver = "thermal";
+					si.temp_path = basepath / "temp";
+
+					int64_t high = 0, crit = 0;
+					for (int ii = 0; fs::exists(basepath / fmt::format("trip_point_{}_temp", ii)); ii++) {
+						const string trip_type = readfile(basepath / fmt::format("trip_point_{}_type", ii));
+						if (not is_in(trip_type, "high", "critical")) continue;
+						auto& val = (trip_type == "high" ? high : crit);
+						val = stol(readfile(basepath / fmt::format("trip_point_{}_temp", ii), "0")) / 1000;
+					}
+					if (high < 1) high = 80;
+					if (crit < 1) crit = 95;
+					si.temp_high = high;
+					si.temp_max = crit;
+					si.temp = { stol(readfile(basepath / "temp", "0")) / 1000 };
+					sensors.push_back(si);
+				}
+			}
+		}
+		catch (...) {}
+
+		rng::sort(sensors, [](const auto& a, const auto& b){ return a.name < b.name; });
+
+		return not sensors.empty();
+	}
+
+	void update_sensors() {
+		for (auto& s : sensors) {
+			s.temp.push_back(stol(readfile(s.temp_path, "0")) / 1000);
+			if (s.temp.size() > 20) s.temp.pop_front();
+		}
 	}
 }
 

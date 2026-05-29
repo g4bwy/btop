@@ -473,5 +473,23 @@ namespace Proc {
 	void toggle_tree_collapse(std::vector<proc_info>& current_procs);
 }
 
+namespace Sensors {
+	extern bool shown;
+
+	struct sensor_info {
+		string name;
+		string driver;
+		std::filesystem::path temp_path;
+		deque<long long> temp;
+		long long temp_max = 0;
+		long long temp_high = 0;
+	};
+
+	extern vector<sensor_info> sensors;
+
+	bool get_sensors();
+	void update_sensors();
+}
+
 /// Detect container engine.
 auto detect_container() -> std::optional<std::string>;

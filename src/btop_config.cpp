@@ -164,6 +164,14 @@ namespace Config {
 
 		{"temp_scale", 			"#* Which temperature scale to use, available values: \"celsius\", \"fahrenheit\", \"kelvin\" and \"rankine\"."},
 
+		{"show_sensors", 		"#* Show additional hwmon temperature sensors (not used for CPU/GPU) in a dedicated sensors box.\n"
+								"#* Sensors are read from /sys/class/hwmon and /sys/class/thermal.\n"
+								"#* Use \"sensors_filter\" to control which sensors are shown."},
+
+		{"sensors_filter", 		"#* Comma-separated list of hwmon driver names to show in the sensors box.\n"
+								"#* Examples: \"nvme,it8613\" shows only NVMe and IT8613 sensors.\n"
+								"#* Empty string shows all non-CPU sensors."},
+
 		{"base_10_sizes",		"#* Use base 10 for bits/bytes sizes, KB = 1000 instead of KiB = 1024."},
 
 		{"show_cpu_freq", 		"#* Show CPU frequency."},
@@ -268,6 +276,9 @@ namespace Config {
 		{"cpu_core_map", ""},
 		{"temp_scale", "celsius"},
 	#ifdef __linux__
+		{"sensors_filter", ""},
+	#endif
+	#ifdef __linux__
 		{"freq_mode", "first"},
 	#endif
 		{"clock_format", "%X"},
@@ -314,6 +325,9 @@ namespace Config {
 		{"show_cpu_watts", true},
 		{"check_temp", true},
 		{"show_coretemp", true},
+	#ifdef __linux__
+		{"show_sensors", false},
+	#endif
 		{"show_cpu_freq", true},
 		{"background_update", true},
 		{"mem_graphs", true},

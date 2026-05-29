@@ -515,12 +515,17 @@ namespace Draw {
 
 }
 
+namespace Sensors {
+	extern vector<Draw::Graph> temp_graphs;
+}
+
 namespace Cpu {
 	int width_p = 100, height_p = 32;
 	int min_width = 60, min_height = 8;
 	int x = 1, y = 1, width = 20, height;
 	int b_columns, b_column_size;
 	int b_x, b_y, b_width, b_height;
+	int s_x, s_y, s_width, s_height; // Sensors sub-box
 	float max_observed_pwr = 1.0f;
 
 	int graph_up_height, graph_low_height;
@@ -612,7 +617,7 @@ namespace Cpu {
 			}
 
 			//? Graphs & meters
-			const int graph_default_width = x + width - b_width - 3;
+			const int graph_default_width = (s_width > 0 ? s_x - b_width - 4 : x + width - b_width - 3);
 
 			auto init_graphs = [&](vector<Draw::Graph>& graphs, const int graph_height, int& graph_width, const string& graph_field, bool invert) {
 			#ifdef GPU_SUPPORT
@@ -707,9 +712,11 @@ namespace Cpu {
 			cpu_meter = Draw::Meter{cpu_meter_width, "cpu"};
 
 			if (mid_line) {
+				const int mid_line_width = (s_width > 0 ? s_x - b_width - 3 : width - b_width - 2);
+				const int mid_line_center = (s_width > 0 ? (s_x - b_width) / 2 : (width - b_width) / 2);
 				out += Mv::to(y + graph_up_height + 1, x) + Fx::ub + Theme::c("cpu_box") + Symbols::div_left + Theme::c("div_line")
-					+ Symbols::h_line * (width - b_width - 2) + Symbols::div_right
-					+ Mv::to(y + graph_up_height + 1, x + ((width - b_width) / 2) - ((graph_up_field.size() + graph_lo_field.size()) / 2) - 4)
+					+ Symbols::h_line * mid_line_width + Symbols::div_right
+					+ Mv::to(y + graph_up_height + 1, x + mid_line_center - ((graph_up_field.size() + graph_lo_field.size()) / 2) - 4)
 					+ Theme::c("main_fg") + graph_up_field + Mv::r(1) + "▲▼" + Mv::r(1) + graph_lo_field;
 			}
 
@@ -925,7 +932,6 @@ namespace Cpu {
 				cy = 1; cx = (b_width / b_columns) * cc;
 			}
 		}
-
 		//? Load average
 		if (cy < b_height - 1 and cc <= b_columns) {
 			cy = b_height - 2 - n_gpus_to_show;
@@ -988,6 +994,38 @@ namespace Cpu {
 			}
 		}
 	#endif
+
+		//* Draw hwmon sensors in sensors sub-box
+		#ifdef __linux__
+		if (s_width > 0 and not Sensors::sensors.empty()) {
+			if (redraw) {
+				Sensors::temp_graphs.clear();
+				for (const auto& s : Sensors::sensors) {
+					Sensors::temp_graphs.emplace_back(5, 1, "temp", s.temp, graph_symbol, false, false,
+						(s.temp_max > 0 ? s.temp_max : 100), -23);
+				}
+			}
+
+			int sy = 0;
+			for (size_t i = 0; i < Sensors::sensors.size() && sy < s_height - 1; ++i) {
+				const auto& sens = Sensors::sensors[i];
+				const auto cur_temp = sens.temp.empty() ? 0ll : sens.temp.back();
+				const auto [temp, unit] = celsius_to(cur_temp, temp_scale);
+				const auto temp_max = (sens.temp_max > 0 ? sens.temp_max : 100);
+				const auto temp_color = Theme::g("temp").at(clamp(cur_temp * 100 / temp_max, 0ll, 100ll));
+
+				out += Mv::to(s_y + sy + 1, s_x + 1) + Theme::c("main_fg") + Fx::b
+					+ ljust(sens.name, s_width - 12);
+
+				if (cmp_less(i, Sensors::temp_graphs.size()) and b_columns > 0)
+					out += Theme::c("inactive_fg") + graph_bg * 5 + Mv::l(5)
+						+ temp_color + Sensors::temp_graphs.at(i)(sens.temp, data_same or redraw);
+
+				out += temp_color + rjust(to_string(temp), 3) + Theme::c("main_fg") + unit + Fx::ub;
+				++sy;
+			}
+		}
+		#endif
 
 		redraw = false;
 		return out + Fx::reset;
@@ -1567,6 +1605,10 @@ namespace Net {
 		return out + Fx::reset;
 	}
 
+}
+
+namespace Sensors {
+	vector<Draw::Graph> temp_graphs;
 }
 
 namespace Proc {
@@ -2271,6 +2313,7 @@ namespace Draw {
 		Mem::shown = boxes.contains("mem");
 		Net::shown = boxes.contains("net");
 		Proc::shown = boxes.contains("proc");
+		Sensors::shown = Config::getB("show_sensors");
 
 		//* Calculate and draw cpu box outlines
 		if (Cpu::shown) {
@@ -2338,11 +2381,44 @@ namespace Draw {
 		#else
 			static const bool freq_range = false;
 		#endif
+
+			//* Calculate sensors sub-box dimensions (before cpu_title so it can account for it)
+		#ifdef __linux__
+			if (Config::getB("show_sensors") and not Sensors::sensors.empty()) {
+				s_width = 28;
+				s_height = max(b_height, (int)Sensors::sensors.size() + 2);
+				// Adjust cores box height to match sensors if needed
+				if (s_height > b_height)
+					b_height = s_height;
+				// Sensors box goes to the RIGHT of cores box, both inside CPU box
+				// s_x + s_width - 1 = x + width - 1  (sensors right edge = CPU box right edge)
+				s_x = x + width - s_width - 1;
+				// b_x + b_width + 1 + s_width - 1 = x + width - 1  (cores right edge + gap + sensors = CPU right edge)
+				b_x = x + width - b_width - s_width - 1;
+				// Recenter vertically
+				b_y = y + ceil((double)(height - 2) / 2) - ceil((double)b_height / 2) + 1;
+				s_y = b_y;
+				// Ensure cores box doesn't overlap CPU info area (need at ~30 chars for graphs)
+				if (b_x < x + 30)
+					s_width = 0; // Not enough room, disable sensors box
+			} else {
+				s_width = 0;
+			}
+		#else
+			s_width = 0;
+		#endif
+
 			const string cpu_title = uresize(
 					(custom.empty() ? Cpu::cpuName : custom),
 					b_width - (Config::getB("show_cpu_freq") and hasCpuHz ? (freq_range ? 24 : 14) : 5)
 			);
 			box += createBox(b_x, b_y, b_width, b_height, "", false, cpu_title);
+
+			//* Create sensors sub-box outline
+		#ifdef __linux__
+			if (s_width > 0)
+				box += createBox(s_x, s_y, s_width, s_height, "", false, "Sensors");
+		#endif
 		}
 
 	#ifdef GPU_SUPPORT
